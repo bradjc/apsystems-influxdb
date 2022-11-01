@@ -9,6 +9,10 @@ import mechanize
 import requests
 import sys
 
+if len(sys.argv) == 2:
+    DAYS_BACK = int(sys.argv[1])
+else:
+    DAYS_BACK = 0
 
 CONFIG_FILE_PATH = "/etc/swarm-gateway/apsystems.conf"
 INFLUX_CONFIG_FILE_PATH = "/etc/swarm-gateway/influx.conf"
@@ -101,7 +105,7 @@ fetcher = APsystemsFetcher(
 
 # What day to fetch for. The API just takes a day and gives all readings for
 # that day.
-fetch_day = datetime.datetime.today() - datetime.timedelta(0)
+fetch_day = datetime.datetime.today() - datetime.timedelta(DAYS_BACK)
 
 # Get the day's data.
 d = fetcher.fetch(fetch_day)
