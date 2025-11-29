@@ -9,10 +9,15 @@ import mechanize
 import requests
 import sys
 
-if len(sys.argv) == 2:
+if len(sys.argv) >= 2:
     DAYS_BACK = int(sys.argv[1])
 else:
     DAYS_BACK = 0
+
+if len(sys.argv) >= 3:
+    DAYS_BACK_TO = int(sys.argv[2])
+else:
+    DAYS_BACK_TO = DAYS_BACK
 
 CONFIG_FILE_PATH = "/etc/swarm-gateway/apsystems.conf"
 INFLUX_CONFIG_FILE_PATH = "/etc/swarm-gateway/influx.conf"
@@ -49,6 +54,7 @@ class APsystemsFetcher:
         self._password = password
         self._system_id = system_id
         self._ecu_id = ecu_id
+        self._browser = None
 
     def login(self):
         browser = mechanize.Browser()
@@ -66,10 +72,11 @@ class APsystemsFetcher:
         browser.form["password"] = self._password
         browser.submit()
 
-        return browser
+        self._browser = browser
 
     def fetch(self, day):
-        browser = self.login()
+        if self._browser == None:
+            self.login()
 
         post_data = {
             "queryDate": day.strftime("%Y%m%d"),
@@ -84,7 +91,7 @@ class APsystemsFetcher:
             None,
             post_data,
             self.headers,
-            browser.cookiejar,
+            self._browser.cookiejar,
         )
 
         if result_data.status_code == 204:
@@ -102,94 +109,99 @@ fetcher = APsystemsFetcher(
     ap_config["system_id"],
     ap_config["ecu_id"],
 )
+fetcher.login()
 
-# What day to fetch for. The API just takes a day and gives all readings for
-# that day.
-fetch_day = datetime.datetime.today() - datetime.timedelta(DAYS_BACK)
+for day in range(DAYS_BACK, DAYS_BACK_TO + 1):
+    print(f"Going Back {day} days")
 
-# Get the day's data.
-d = fetcher.fetch(fetch_day)
+    # What day to fetch for. The API just takes a day and gives all readings for
+    # that day.
+    fetch_day = datetime.datetime.today() - datetime.timedelta(day)
 
-# Check if something went wrong.
-if d == None:
-    print("could not get ap systems data")
-    sys.exit(-1)
+    # Get the day's data.
+    d = fetcher.fetch(fetch_day)
 
-# List of points to send to influxdb.
-points = []
+    # Check if something went wrong.
+    if d == None:
+        print("could not get ap systems data")
+        sys.exit(-1)
 
-# Metadata added to each point.
-metadata = {
-    "device_id": "apsystems-ecu-{}".format(ap_config["ecu_id"]),
-    "apsystems_system_id": ap_config["system_id"],
-    "location_general": ap_config["location_general"],
-    "location_specific": "Roof",
-    "description": "Solar Panels",
-}
+    # List of points to send to influxdb.
+    points = []
 
-# Format the solar data in the influx format I want.
-for i in range(0, len(d["time"])):
-    uts = d["time"][i]
-    power = int(d["power"][i])
-    energy = float(d["energy"][i])
-
-    # Seems like AP systems is 8 hours behind me? This is confusing.
-    uts += 8 * 60 * 60 * 1000
-
-    # Need to convert the unix timestamp to UTC.
-    t = arrow.get(uts).replace(tzinfo="US/Eastern").to("utc")
-    # Need nanosecond timestamp for influx.
-    ts = int(t.timestamp() * 1000 * 1000 * 1000)
-
-    # Get a single measurement with the fields.
-    point = {
-        "measurement": "apsystems",
-        "fields": {
-            "power_w": power,
-            "energy_kWh": energy,
-        },
-        "tags": metadata,
-        "time": ts,
+    # Metadata added to each point.
+    metadata = {
+        "device_id": "apsystems-ecu-{}".format(ap_config["ecu_id"]),
+        "apsystems_system_id": ap_config["system_id"],
+        "location_general": ap_config["location_general"],
+        "location_specific": "Roof",
+        "description": "Solar Panels",
     }
-    points.append(point)
 
-    # Just power, in the generic-gateway format.
-    point = {
-        "measurement": "power_w",
-        "fields": {
-            "value": float(power),
-        },
-        "tags": metadata,
-        "time": ts,
-    }
-    points.append(point)
+    # Format the solar data in the influx format I want.
+    for i in range(0, len(d["time"])):
+        try:
+            uts = d["time"][i]
+            power = int(d["power"][i])
+            energy = float(d["energy"][i])
 
-    # Just energy, in the generic-gateway format.
-    point = {
-        "measurement": "energy_kWh",
-        "fields": {
-            "value": energy,
-        },
-        "tags": metadata,
-        "time": ts,
-    }
-    points.append(point)
+            # Seems like AP systems is 8 hours behind me? This is confusing.
+            uts += 8 * 60 * 60 * 1000
 
-print("got points")
+            # Need to convert the unix timestamp to UTC.
+            t = arrow.get(uts).replace(tzinfo="US/Eastern").to("utc")
+            # Need nanosecond timestamp for influx.
+            ts = int(t.timestamp() * 1000 * 1000 * 1000)
 
+            # Get a single measurement with the fields.
+            point = {
+                "measurement": "apsystems",
+                "fields": {
+                    "power_w": power,
+                    "energy_kWh": energy,
+                },
+                "tags": metadata,
+                "time": ts,
+            }
+            points.append(point)
 
-client = influxdb.InfluxDBClient(
-    influx_config["url"],
-    influx_config["port"],
-    influx_config["username"],
-    influx_config["password"],
-    influx_config["database"],
-    ssl=True,
-    gzip=True,
-    verify_ssl=True,
-)
+            # Just power, in the generic-gateway format.
+            point = {
+                "measurement": "power_w",
+                "fields": {
+                    "value": float(power),
+                },
+                "tags": metadata,
+                "time": ts,
+            }
+            points.append(point)
 
+            # Just energy, in the generic-gateway format.
+            point = {
+                "measurement": "energy_kWh",
+                "fields": {
+                    "value": energy,
+                },
+                "tags": metadata,
+                "time": ts,
+            }
+            points.append(point)
+        except:
+            print("could not parse measurement")
 
-client.write_points(points)
+    print("got points")
 
-print("wrote points")
+    client = influxdb.InfluxDBClient(
+        influx_config["url"],
+        influx_config["port"],
+        influx_config["username"],
+        influx_config["password"],
+        influx_config["database"],
+        ssl=True,
+        gzip=True,
+        verify_ssl=True,
+    )
+
+    client.write_points(points)
+
+    print("wrote points")
